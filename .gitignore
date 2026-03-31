@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+input/
+output/
+_review/
+.EasyOCR/
