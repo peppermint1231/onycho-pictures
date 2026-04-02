@@ -4,3 +4,4 @@ input/
 output/
 _review/
 .EasyOCR/
+_learned_corrections.json

@@ -17,7 +17,8 @@ def get_target_folder(info, output_dir=None):
     date_folder = DATE_FOLDER_FORMAT.format(
         year=info.year, month=info.month, day=info.day
     )
-    patient_folder = f"{info.date_raw} {info.patient_name} {info.visit_number}회"
+    visit_str = info.visit_raw if info.visit_raw else f"{info.visit_number}회"
+    patient_folder = f"{info.date_raw} {info.patient_name} {visit_str}"
 
     return os.path.join(output_dir, date_folder, patient_folder)
 

@@ -24,7 +24,7 @@ IMAGE_MAX_SIZE = None
 # 예: 하단 40%만 스캔 → CROP_TOP=0.6, CROP_BOTTOM=1.0
 # None이면 전체 이미지 스캔
 CROP_TOP = 0.0      # 상단부터
-CROP_BOTTOM = 0.25  # 위쪽 25%까지
+CROP_BOTTOM = 0.30  # 위쪽 30%까지
 CROP_LEFT = 0.7     # 오른쪽 30%부터
 CROP_RIGHT = 1.0    # 우측 끝까지
 
