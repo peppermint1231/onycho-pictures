@@ -54,8 +54,12 @@ def _open_file(path):
 def _make_status(info):
     """PhotoInfo에서 상태 문자열을 생성합니다."""
     visit_str = info.visit_raw or f"{info.visit_number}회"
-    tag = " [보정]" if info.corrected else ""
-    return f"-> {info.date_raw} {info.patient_name} {visit_str}{tag}"
+    tags = ""
+    if info.corrected:
+        tags += " [보정]"
+    if info.visit_review:
+        tags += " [회차검토]"
+    return f"-> {info.date_raw} {info.patient_name} {visit_str}{tags}"
 
 
 def _make_dark_button(parent, text, command, **kwargs):
@@ -75,15 +79,17 @@ def _make_dark_button(parent, text, command, **kwargs):
 # ============================================================
 
 class ReviewDialog:
-    def __init__(self, parent, fail_items):
+    def __init__(self, parent, fail_items, group_paths=None, group_cache=None):
         self.parent = parent
         self.fail_items = fail_items
         self.results = {}
         self.current_index = 0
+        self.group_paths = group_paths or []
+        self.group_cache = group_cache or {}
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("수동 분류 - 실패 사진 리뷰")
-        self.dialog.geometry("750x580")
+        self.dialog.geometry("750x780")
         self.dialog.resizable(True, True)
         self.dialog.grab_set()
         self.dialog.configure(bg=COLORS["bg"])
@@ -133,7 +139,7 @@ class ReviewDialog:
         for (label_text, attr_name), fill_cmd in zip([
             ("날짜 (YYMMDD):", "date_entry"),
             ("환자 이름:", "name_entry"),
-            ("회차 (숫자 또는 fu숫자):", "visit_entry"),
+            ("회차 (예: 3, fu2):", "visit_entry"),
         ], fill_cmds):
             row = tk.Frame(input_frame, bg=COLORS["surface"])
             row.pack(fill=tk.X, pady=(0, 2))
@@ -151,6 +157,37 @@ class ReviewDialog:
                              highlightbackground=COLORS["border"])
             entry.pack(anchor=tk.W, pady=(0, 8), ipady=4, fill=tk.X)
             setattr(self, attr_name, entry)
+
+        # 그룹 일괄 적용 체크박스 + 그룹 정보
+        self.apply_group_var = tk.BooleanVar(value=False)
+        self.group_check = tk.Checkbutton(
+            input_frame, text="그룹 일괄 적용", variable=self.apply_group_var,
+            bg=COLORS["surface"], fg=COLORS["accent_light"], selectcolor=COLORS["surface2"],
+            activebackground=COLORS["surface"], activeforeground=COLORS["accent_light"],
+            font=("Segoe UI", 9), command=self._toggle_group_detail)
+        self.group_detail_outer = tk.Frame(input_frame, bg=COLORS["surface2"])
+        self.group_detail_canvas = tk.Canvas(
+            self.group_detail_outer, bg=COLORS["surface2"], highlightthickness=0,
+            height=min(200, max(80, len(self.group_paths) * 20)))
+        self.group_detail_scrollbar = tk.Scrollbar(
+            self.group_detail_outer, orient=tk.VERTICAL, command=self.group_detail_canvas.yview)
+        self.group_detail_frame = tk.Frame(self.group_detail_canvas, bg=COLORS["surface2"], padx=6, pady=4)
+        self.group_detail_frame.bind("<Configure>", lambda e: self.group_detail_canvas.configure(
+            scrollregion=self.group_detail_canvas.bbox("all")))
+        self.group_detail_canvas.create_window((0, 0), window=self.group_detail_frame, anchor=tk.NW)
+        self.group_detail_canvas.configure(yscrollcommand=self.group_detail_scrollbar.set)
+        self.group_detail_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.group_detail_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # 마우스 휠 스크롤
+        def _on_mousewheel(event):
+            self.group_detail_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.group_detail_canvas.bind("<MouseWheel>", _on_mousewheel)
+        self.group_detail_frame.bind("<MouseWheel>", _on_mousewheel)
+        if len(self.group_paths) > 1:
+            self.group_check.config(
+                text=f"그룹 일괄 적용 ({len(self.group_paths)}장)")
+            self.group_check.pack(anchor=tk.W, pady=(8, 0))
+            self._build_group_detail()
 
         # 액션 버튼
         btn_frame = tk.Frame(input_frame, bg=COLORS["surface"])
@@ -170,6 +207,57 @@ class ReviewDialog:
                           font=("Segoe UI", 9, "bold"), padx=16, pady=4).pack(side=tk.RIGHT)
 
         self.dialog.bind("<Return>", lambda e: self._save_and_next())
+        self.dialog.bind("<Escape>", lambda e: self._done())
+
+    def _build_group_detail(self):
+        """그룹 멤버 목록과 파싱 결과를 표시하는 패널 구성"""
+        def _on_mousewheel(event):
+            self.group_detail_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        for gp in self.group_paths:
+            fn = os.path.basename(gp)
+            info = self.group_cache.get(gp)
+            if info is not None:
+                if isinstance(info, dict) and "failed" in info:
+                    detail = info["display"]
+                    fg = COLORS["error"]
+                elif isinstance(info, dict) and "display" in info:
+                    detail = info["display"]
+                    fg = COLORS["success"]
+                elif isinstance(info, dict) and "date" in info:
+                    detail = f"{info['date']}  {info['name']}  {info['visit']}"
+                    fg = COLORS["success"]
+                elif hasattr(info, "patient_name"):
+                    vs = info.visit_raw or f"{info.visit_number}회"
+                    detail = f"{info.year}.{info.month:02d}.{info.day:02d}  {info.patient_name}  {vs}"
+                    fg = COLORS["success"]
+                else:
+                    detail = "미분류"
+                    fg = COLORS["text_muted"]
+            else:
+                detail = "미분류"
+                fg = COLORS["text_muted"]
+            row = tk.Frame(self.group_detail_frame, bg=COLORS["surface2"])
+            row.pack(fill=tk.X, pady=1)
+            row.bind("<MouseWheel>", _on_mousewheel)
+            path = gp
+            lbl1 = tk.Label(row, text=fn, font=("Segoe UI", 7),
+                     bg=COLORS["surface2"], fg=COLORS["text_dim"],
+                     width=22, anchor=tk.W, cursor="hand2")
+            lbl1.pack(side=tk.LEFT)
+            lbl1.bind("<MouseWheel>", _on_mousewheel)
+            lbl1.bind("<Double-1>", lambda e, p=path: _open_file(p))
+            lbl2 = tk.Label(row, text=detail, font=("Segoe UI", 7),
+                     bg=COLORS["surface2"], fg=fg, anchor=tk.W, cursor="hand2")
+            lbl2.pack(side=tk.LEFT, padx=(4, 0))
+            lbl2.bind("<MouseWheel>", _on_mousewheel)
+            lbl2.bind("<Double-1>", lambda e, p=path: _open_file(p))
+
+    def _toggle_group_detail(self):
+        """체크박스 토글 시 그룹 상세 패널 표시/숨김"""
+        if self.apply_group_var.get():
+            self.group_detail_outer.pack(fill=tk.X, pady=(4, 0))
+        else:
+            self.group_detail_outer.pack_forget()
 
     def _get_cropped_image(self, image_path):
         img = Image.open(image_path)
@@ -192,12 +280,35 @@ class ReviewDialog:
         self.filename_var.set(item["filename"])
         self.reason_var.set(item["reason"])
 
-        # 이전 입력 복원 또는 초기화
+        # 이전 입력 복원 또는 기존 파싱값 채우기
         if path in self.results and self.results[path] is not None:
             info = self.results[path]
             for entry, val in [(self.date_entry, info.date_raw),
                                 (self.name_entry, info.patient_name),
                                 (self.visit_entry, info.visit_raw or str(info.visit_number))]:
+                entry.delete(0, tk.END)
+                entry.insert(0, val)
+        elif "existing_info" in item:
+            info = item["existing_info"]
+            visit_val = info.visit_raw or str(info.visit_number)
+            visit_val = re.sub(r'회$', '', visit_val)
+            for entry, val in [(self.date_entry, info.date_raw),
+                                (self.name_entry, info.patient_name),
+                                (self.visit_entry, visit_val)]:
+                entry.delete(0, tk.END)
+                entry.insert(0, val)
+        elif "existing_display" in item:
+            d = item["existing_display"]
+            # 날짜를 YYYY.MM.DD → YYMMDD로 변환
+            date_parts = d["date"].split(".")
+            if len(date_parts) == 3:
+                date_val = date_parts[0][2:] + date_parts[1] + date_parts[2]
+            else:
+                date_val = d["date"]
+            visit_val = re.sub(r'회$', '', d["visit"])
+            for entry, val in [(self.date_entry, date_val),
+                                (self.name_entry, d["name"]),
+                                (self.visit_entry, visit_val)]:
                 entry.delete(0, tk.END)
                 entry.insert(0, val)
         else:
@@ -296,6 +407,16 @@ class ReviewDialog:
         )
         self.results[path] = info
 
+        # 그룹 일괄 적용
+        if self.apply_group_var.get() and len(self.group_paths) > 1:
+            for gp in self.group_paths:
+                if gp != path:
+                    self.results[gp] = PhotoInfo(
+                        date_raw=date_raw, year=2000 + yy, month=mm, day=dd,
+                        patient_name=name, visit_number=visit_number,
+                        confidence=1.0, source_path=gp, visit_raw=visit_raw,
+                    )
+
         # 학습 저장
         save_learned(self._get_ocr_text(), info)
 
@@ -343,7 +464,7 @@ class LearnedCorrectionsDialog:
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("학습 보정 관리")
-        self.dialog.geometry("600x500")
+        self.dialog.geometry("600x680")
         self.dialog.resizable(True, True)
         self.dialog.grab_set()
         self.dialog.configure(bg=COLORS["bg"])
@@ -364,7 +485,7 @@ class LearnedCorrectionsDialog:
 
         columns = ("유형", "OCR 인식값", "보정값")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
-                                  height=15, selectmode="extended")
+                                  height=10, selectmode="extended")
         for col, w in [("유형", 80), ("OCR 인식값", 200), ("보정값", 200)]:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, minwidth=60)
@@ -383,6 +504,46 @@ class LearnedCorrectionsDialog:
         self.tree.bind("<Delete>", lambda e: self._delete_selected())
 
         self._populate()
+
+        # 수기 추가 영역
+        add_frame = tk.LabelFrame(main, text=" 수기 추가 ", font=("Segoe UI", 9),
+                                   bg=COLORS["surface"], fg=COLORS["text_dim"],
+                                   bd=1, relief="solid", padx=8, pady=8)
+        add_frame.pack(fill=tk.X, pady=(8, 0))
+
+        type_row = tk.Frame(add_frame, bg=COLORS["surface"])
+        type_row.pack(fill=tk.X, pady=2)
+        tk.Label(type_row, text="유형:", bg=COLORS["surface"], fg=COLORS["text_dim"],
+                 font=("Segoe UI", 9), width=10, anchor="w").pack(side=tk.LEFT)
+        self.add_type_var = tk.StringVar(value="이름")
+        for txt in ("이름", "회차", "날짜"):
+            tk.Radiobutton(type_row, text=txt, variable=self.add_type_var, value=txt,
+                           bg=COLORS["surface"], fg=COLORS["text"], selectcolor=COLORS["surface2"],
+                           activebackground=COLORS["surface"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 8))
+
+        val_row = tk.Frame(add_frame, bg=COLORS["surface"])
+        val_row.pack(fill=tk.X, pady=2)
+        tk.Label(val_row, text="OCR 인식값:", bg=COLORS["surface"], fg=COLORS["text_dim"],
+                 font=("Segoe UI", 9), width=10, anchor="w").pack(side=tk.LEFT)
+        self.add_ocr_entry = tk.Entry(val_row, font=("Segoe UI", 10), bg=COLORS["surface2"],
+                                       fg=COLORS["text"], insertbackground=COLORS["text"], relief="flat",
+                                       bd=0, highlightthickness=1, highlightcolor=COLORS["accent"],
+                                       highlightbackground=COLORS["border"])
+        self.add_ocr_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3, padx=(4, 0))
+
+        corr_row = tk.Frame(add_frame, bg=COLORS["surface"])
+        corr_row.pack(fill=tk.X, pady=2)
+        tk.Label(corr_row, text="보정값:", bg=COLORS["surface"], fg=COLORS["text_dim"],
+                 font=("Segoe UI", 9), width=10, anchor="w").pack(side=tk.LEFT)
+        self.add_corr_entry = tk.Entry(corr_row, font=("Segoe UI", 10), bg=COLORS["surface2"],
+                                        fg=COLORS["text"], insertbackground=COLORS["text"], relief="flat",
+                                        bd=0, highlightthickness=1, highlightcolor=COLORS["accent"],
+                                        highlightbackground=COLORS["border"])
+        self.add_corr_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3, padx=(4, 0))
+
+        _make_dark_button(add_frame, "추가", self._add_entry,
+                          bg=COLORS["accent"], fg="white",
+                          font=("Segoe UI", 9, "bold"), padx=12).pack(anchor=tk.E, pady=(6, 0))
 
         # 하단 버튼
         btn_frame = tk.Frame(main, bg=COLORS["bg"])
@@ -414,6 +575,20 @@ class LearnedCorrectionsDialog:
             self.tree.delete(item_id)
         self._save()
 
+    def _add_entry(self):
+        type_map = {"이름": "name_corrections", "회차": "visit_corrections", "날짜": "date_corrections"}
+        category = type_map[self.add_type_var.get()]
+        ocr_val = self.add_ocr_entry.get().strip()
+        corr_val = self.add_corr_entry.get().strip()
+        if not ocr_val or not corr_val:
+            messagebox.showwarning("입력 부족", "OCR 인식값과 보정값을 모두 입력해주세요.", parent=self.dialog)
+            return
+        self.data[category][ocr_val] = corr_val
+        self._populate()
+        self._save()
+        self.add_ocr_entry.delete(0, tk.END)
+        self.add_corr_entry.delete(0, tk.END)
+
     def _clear_all(self):
         if messagebox.askyesno("확인", "모든 학습 데이터를 삭제하시겠습니까?", parent=self.dialog):
             self.data = {"name_corrections": {}, "visit_corrections": {}, "date_corrections": {}}
@@ -432,6 +607,130 @@ class LearnedCorrectionsDialog:
 
 
 # ============================================================
+# SettingsDialog: 설정 편집
+# ============================================================
+
+class SettingsDialog:
+    def __init__(self, parent):
+        import config as config_module
+        import parser as parser_module
+        self.config_mod = config_module
+        self.parser_mod = parser_module
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("설정 편집")
+        self.dialog.geometry("520x600")
+        self.dialog.resizable(True, True)
+        self.dialog.grab_set()
+        self.dialog.configure(bg=COLORS["bg"])
+        self._build_ui()
+
+    def _build_ui(self):
+        main = tk.Frame(self.dialog, bg=COLORS["bg"], padx=15, pady=15)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(main, text="설정 편집", font=("Segoe UI", 14, "bold"),
+                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor=tk.W, pady=(0, 5))
+        tk.Label(main, text="변경 후 저장하면 즉시 적용됩니다. (재시작 불필요)",
+                 font=("Segoe UI", 9), bg=COLORS["bg"], fg=COLORS["text_dim"]).pack(anchor=tk.W, pady=(0, 12))
+
+        # 스크롤 가능한 설정 영역
+        canvas = tk.Canvas(main, bg=COLORS["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main, orient=tk.VERTICAL, command=canvas.yview)
+        self.settings_frame = tk.Frame(canvas, bg=COLORS["bg"])
+        self.settings_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.settings_frame, anchor=tk.NW)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.entries = {}
+        settings = [
+            ("OCR 크롭 영역", None, None),
+            ("CROP_TOP", "상단 시작 (0.0~1.0)", self.config_mod.CROP_TOP),
+            ("CROP_BOTTOM", "하단 끝 (0.0~1.0)", self.config_mod.CROP_BOTTOM),
+            ("CROP_LEFT", "좌측 시작 (0.0~1.0)", self.config_mod.CROP_LEFT),
+            ("CROP_RIGHT", "우측 끝 (0.0~1.0)", self.config_mod.CROP_RIGHT),
+            ("OCR 설정", None, None),
+            ("CONFIDENCE_THRESHOLD", "OCR 신뢰도 임계값 (0.0~1.0)", self.config_mod.CONFIDENCE_THRESHOLD),
+            ("IMAGE_MAX_SIZE", "이미지 최대 크기 (None=원본)", self.config_mod.IMAGE_MAX_SIZE),
+            ("파싱 설정", None, None),
+            ("VISIT_MIN", "회차 최소값", self.parser_mod.VISIT_MIN),
+            ("VISIT_MAX", "회차 최대값", self.parser_mod.VISIT_MAX),
+            ("DATE_TOLERANCE_DAYS", "날짜 보정 허용 오차 (일)", self.parser_mod.DATE_TOLERANCE_DAYS),
+            ("그룹 설정", None, None),
+            ("max_gap_seconds", "연속 촬영 그룹 간격 (초)", 60),
+            ("폴더 형식", None, None),
+            ("DATE_FOLDER_FORMAT", "날짜 폴더 형식", self.config_mod.DATE_FOLDER_FORMAT),
+        ]
+
+        for name, desc, value in settings:
+            if value is None and desc is None:
+                # 섹션 헤더
+                tk.Label(self.settings_frame, text=name, font=("Segoe UI", 10, "bold"),
+                         bg=COLORS["bg"], fg=COLORS["accent_light"]).pack(anchor=tk.W, pady=(12, 4))
+                continue
+            row = tk.Frame(self.settings_frame, bg=COLORS["bg"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=desc, width=30, anchor="w", bg=COLORS["bg"],
+                     fg=COLORS["text_dim"], font=("Segoe UI", 9)).pack(side=tk.LEFT)
+            entry = tk.Entry(row, font=("Segoe UI", 10), bg=COLORS["surface2"],
+                             fg=COLORS["text"], insertbackground=COLORS["text"], relief="flat",
+                             bd=0, highlightthickness=1, highlightcolor=COLORS["accent"],
+                             highlightbackground=COLORS["border"])
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0), ipady=3)
+            entry.insert(0, str(value) if value is not None else "None")
+            self.entries[name] = entry
+
+        # 하단 버튼
+        btn_frame = tk.Frame(main, bg=COLORS["bg"])
+        btn_frame.pack(fill=tk.X, pady=(12, 0))
+        _make_dark_button(btn_frame, "저장", self._save,
+                          bg=COLORS["accent"], fg="white",
+                          font=("Segoe UI", 9, "bold"), padx=16).pack(side=tk.LEFT, padx=(0, 8))
+        _make_dark_button(btn_frame, "닫기", self.dialog.destroy, padx=12).pack(side=tk.RIGHT)
+
+    def _parse_value(self, text):
+        text = text.strip()
+        if text.lower() == "none":
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        return text
+
+    def _save(self):
+        try:
+            for name, entry in self.entries.items():
+                val = self._parse_value(entry.get())
+                if name in ("CROP_TOP", "CROP_BOTTOM", "CROP_LEFT", "CROP_RIGHT",
+                            "CONFIDENCE_THRESHOLD", "IMAGE_MAX_SIZE", "DATE_FOLDER_FORMAT"):
+                    setattr(self.config_mod, name, val)
+                elif name in ("VISIT_MIN", "VISIT_MAX", "DATE_TOLERANCE_DAYS"):
+                    setattr(self.parser_mod, name, val)
+                elif name == "max_gap_seconds":
+                    self.parser_mod._default_max_gap = val
+
+            # config 모듈의 전역 변수도 갱신
+            import config
+            for attr in ("CROP_TOP", "CROP_BOTTOM", "CROP_LEFT", "CROP_RIGHT",
+                         "CONFIDENCE_THRESHOLD", "IMAGE_MAX_SIZE", "DATE_FOLDER_FORMAT"):
+                if attr in self.entries:
+                    globals_val = getattr(self.config_mod, attr)
+                    # ocr_engine에서 import한 값도 갱신
+                    setattr(config, attr, globals_val)
+
+            messagebox.showinfo("완료", "설정이 저장되었습니다.", parent=self.dialog)
+        except Exception as e:
+            messagebox.showerror("오류", f"저장 실패: {e}", parent=self.dialog)
+
+
+# ============================================================
 # OrganizerApp: 메인 GUI
 # ============================================================
 
@@ -439,7 +738,8 @@ class OrganizerApp:
     def __init__(self):
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
         self.root.title("무좀 사진 자동 분류기")
-        self.root.geometry("900x750")
+        self.root.geometry("1000x800")
+        self.root.minsize(800, 600)
         self.root.resizable(True, True)
         self.root.configure(bg=COLORS["bg"])
 
@@ -466,7 +766,9 @@ class OrganizerApp:
         self.cache_valid = False
 
         self._setup_style()
+        self._build_menu()
         self._build_ui()
+        self._bind_shortcuts()
 
     def _setup_style(self):
         style = ttk.Style()
@@ -508,17 +810,81 @@ class OrganizerApp:
                          bordercolor=COLORS["border"], arrowcolor=COLORS["text_dim"])
         style.map("Vertical.TScrollbar", background=[("active", COLORS["accent"])])
 
+    def _build_menu(self):
+        menubar = tk.Menu(self.root, bg=COLORS["surface"], fg=COLORS["text"],
+                          activebackground=COLORS["accent"], activeforeground="white",
+                          font=("Segoe UI", 9), bd=0)
+
+        # 도구 메뉴
+        tool_menu = tk.Menu(menubar, tearoff=0, bg=COLORS["surface"], fg=COLORS["text"],
+                            activebackground=COLORS["accent"], activeforeground="white",
+                            font=("Segoe UI", 9))
+        tool_menu.add_command(label="설정 편집...", command=self._open_settings, accelerator="Ctrl+,")
+        tool_menu.add_command(label="학습 보정 관리...", command=self._open_learned, accelerator="Ctrl+L")
+        tool_menu.add_separator()
+        tool_menu.add_command(label="입력 폴더 열기", command=lambda: _open_folder(self.input_dir.get()))
+        tool_menu.add_command(label="출력 폴더 열기", command=lambda: _open_folder(self.output_dir.get()))
+        tool_menu.add_command(label="리뷰 폴더 열기", command=lambda: _open_folder(self.review_dir.get()))
+        tool_menu.add_separator()
+        tool_menu.add_command(label="결과 전체 복사", command=self._copy_all_rows, accelerator="Ctrl+Shift+C")
+        tool_menu.add_command(label="테이블 초기화", command=self._clear_table)
+        menubar.add_cascade(label="도구", menu=tool_menu)
+
+        self.root.config(menu=menubar)
+
+    def _bind_shortcuts(self):
+        self.root.bind("<F5>", lambda e: self._run_preview())
+        self.root.bind("<F6>", lambda e: self._open_review())
+        self.root.bind("<F7>", lambda e: self._run_organize())
+        self.root.bind("<F8>", lambda e: self._toggle_pause())
+        self.root.bind("<Escape>", lambda e: self._stop_processing())
+        self.root.bind("<Control-l>", lambda e: self._open_learned())
+        self.root.bind("<Control-L>", lambda e: self._open_learned())
+        self.root.bind("<Control-comma>", lambda e: self._open_settings())
+        self.root.bind("<Control-Shift-C>", lambda e: self._copy_all_rows())
+        self.root.bind("<Delete>", lambda e: self._delete_selected_rows())
+
+    def _open_settings(self):
+        SettingsDialog(self.root)
+
+    def _clear_table(self):
+        self.tree.delete(*self.tree.get_children())
+
+    def _delete_selected_rows(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        for item in selected:
+            fn = str(self.tree.item(item)["values"][0])
+            self.cached_fail_items = [i for i in self.cached_fail_items if i["filename"] != fn]
+            for path in list(self.cached_results.keys()):
+                if os.path.basename(path) == fn:
+                    del self.cached_results[path]
+                    break
+            self.tree.delete(item)
+
     def _build_ui(self):
         main = tk.Frame(self.root, bg=COLORS["bg"], padx=20, pady=20)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # 타이틀
+        # 타이틀 + 사용방법
         title_frame = tk.Frame(main, bg=COLORS["bg"])
-        title_frame.pack(fill=tk.X, pady=(0, 18))
-        tk.Label(title_frame, text="무좀 사진 자동 분류기", font=("Segoe UI", 20, "bold"),
+        title_frame.pack(fill=tk.X, pady=(0, 12))
+        title_left = tk.Frame(title_frame, bg=COLORS["bg"])
+        title_left.pack(side=tk.LEFT)
+        tk.Label(title_left, text="무좀 사진 자동 분류기", font=("Segoe UI", 18, "bold"),
                  bg=COLORS["bg"], fg=COLORS["text"]).pack(side=tk.LEFT)
-        tk.Label(title_frame, text="OCR Photo Organizer", font=("Segoe UI", 10),
-                 bg=COLORS["bg"], fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 0), pady=(8, 0))
+        tk.Label(title_left, text="OCR Photo Organizer", font=("Segoe UI", 9),
+                 bg=COLORS["bg"], fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(10, 0), pady=(6, 0))
+        help_text = (
+            "1. 사진 우측상단에 날짜(YYMMDD) + 이름 + 회차 수기 기입\n"
+            "2. 미리보기(F5)로 OCR 결과 확인\n"
+            "3. 실패 항목 더블클릭하여 개별 리뷰/수정\n"
+            "4. 분류 실행(F7)으로 폴더 자동 분류"
+        )
+        tk.Label(title_frame, text=help_text, font=("Segoe UI", 8),
+                 bg=COLORS["bg"], fg=COLORS["text_muted"],
+                 justify=tk.LEFT).pack(side=tk.RIGHT, padx=(12, 0))
 
         # 폴더 설정
         folder_frame = tk.LabelFrame(main, text=" 폴더 설정 ", font=("Segoe UI", 9, "bold"),
@@ -546,11 +912,11 @@ class OrganizerApp:
 
         # 드래그 앤 드롭
         self.drop_frame = tk.Label(
-            main, text="여기에 사진 파일을 드래그 앤 드롭하세요\n(입력 폴더로 복사됩니다)",
+            main, text="사진 파일을 여기에 드래그 앤 드롭 (입력 폴더로 복사)",
             relief="flat", bg=COLORS["drop_bg"], fg=COLORS["text_dim"],
-            font=("Segoe UI", 10), height=3, cursor="hand2",
-            highlightthickness=2, highlightbackground=COLORS["border"], highlightcolor=COLORS["accent"])
-        self.drop_frame.pack(fill=tk.X, pady=(0, 8))
+            font=("Segoe UI", 9), height=2, cursor="hand2",
+            highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=COLORS["accent"])
+        self.drop_frame.pack(fill=tk.X, pady=(0, 6))
 
         if HAS_DND:
             self.drop_frame.drop_target_register(DND_FILES)
@@ -558,34 +924,40 @@ class OrganizerApp:
             self.drop_frame.dnd_bind("<<DragEnter>>", lambda e: self.drop_frame.config(bg=COLORS["drop_hover"], highlightbackground=COLORS["accent"]))
             self.drop_frame.dnd_bind("<<DragLeave>>", lambda e: self.drop_frame.config(bg=COLORS["drop_bg"], highlightbackground=COLORS["border"]))
         else:
-            self.drop_frame.config(text="드래그 앤 드롭 미지원\n(찾아보기 버튼을 사용하세요)", fg=COLORS["text_muted"])
+            self.drop_frame.config(text="드래그 앤 드롭 미지원 (찾아보기 버튼을 사용하세요)", fg=COLORS["text_muted"])
 
         # 파일 수
         tk.Label(main, textvariable=self.file_count_var, font=("Segoe UI", 9, "bold"),
-                 bg=COLORS["bg"], fg=COLORS["accent_light"]).pack(anchor=tk.W, pady=(0, 8))
+                 bg=COLORS["bg"], fg=COLORS["accent_light"]).pack(anchor=tk.W, pady=(0, 4))
         self._update_file_count()
 
-        # 옵션 + 버튼
-        ctrl_frame = tk.Frame(main, bg=COLORS["bg"])
-        ctrl_frame.pack(fill=tk.X, pady=(0, 12))
+        # 버튼 행
+        btn_frame = tk.Frame(main, bg=COLORS["bg"])
+        btn_frame.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Checkbutton(ctrl_frame, text="복사 모드 (원본 유지)", variable=self.copy_mode).pack(side=tk.LEFT)
-        _make_dark_button(ctrl_frame, "학습 보정 관리", self._open_learned,
-                          font=("Segoe UI", 8), fg=COLORS["text_dim"], padx=8, pady=2).pack(side=tk.LEFT, padx=(12, 0))
+        self.btn_preview = ttk.Button(btn_frame, text="미리보기 (F5)", command=self._run_preview)
+        self.btn_preview.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_review = ttk.Button(btn_frame, text="실패 리뷰 (F6)", command=self._open_review, state="disabled")
+        self.btn_review.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_run = ttk.Button(btn_frame, text="분류 실행 (F7)", command=self._run_organize, style="Accent.TButton")
+        self.btn_run.pack(side=tk.LEFT, padx=(0, 6))
 
-        # 버튼 (RIGHT pack 역순)
-        self.btn_run = ttk.Button(ctrl_frame, text="분류 실행", command=self._run_organize, style="Accent.TButton")
-        self.btn_run.pack(side=tk.RIGHT, padx=(8, 0))
-        self.btn_review = ttk.Button(ctrl_frame, text="실패 사진 리뷰", command=self._open_review, state="disabled")
-        self.btn_review.pack(side=tk.RIGHT, padx=(8, 0))
-        self.btn_pause = ttk.Button(ctrl_frame, text="일시정지", command=self._toggle_pause, state="disabled")
-        self.btn_pause.pack(side=tk.RIGHT, padx=(8, 0))
-        self.btn_preview = ttk.Button(ctrl_frame, text="미리보기", command=self._run_preview)
-        self.btn_preview.pack(side=tk.RIGHT)
+        # 구분선
+        tk.Frame(btn_frame, bg=COLORS["border"], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+
+        self.btn_pause = ttk.Button(btn_frame, text="일시정지 (F8)", command=self._toggle_pause, state="disabled")
+        self.btn_pause.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_stop = ttk.Button(btn_frame, text="정지 (Esc)", command=self._stop_processing, state="disabled")
+        self.btn_stop.pack(side=tk.LEFT, padx=(0, 6))
+
+        # 옵션 행
+        opt_frame = tk.Frame(main, bg=COLORS["bg"])
+        opt_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Checkbutton(opt_frame, text="복사 모드 (원본 유지)", variable=self.copy_mode).pack(side=tk.LEFT)
 
         # 진행 바 + 상태
         self.progress = ttk.Progressbar(main, mode="determinate")
-        self.progress.pack(fill=tk.X, pady=(0, 8))
+        self.progress.pack(fill=tk.X, pady=(0, 4))
         tk.Label(main, textvariable=self.status_var, font=("Segoe UI", 9),
                  bg=COLORS["bg"], fg=COLORS["text_dim"]).pack(anchor=tk.W, pady=(0, 4))
 
@@ -673,11 +1045,7 @@ class OrganizerApp:
         selected = self.tree.selection()
         if not selected:
             return
-        status = str(self.tree.item(selected[0])["values"][4])
-        if any(kw in status for kw in ("실패", "미분류", "오류")):
-            self._review_selected()
-        else:
-            self._open_selected_photo()
+        self._review_selected()
 
     def _open_selected_photo(self):
         selected = self.tree.selection()
@@ -718,27 +1086,89 @@ class OrganizerApp:
         if fail_item is None:
             for path, info in self.cached_results.items():
                 if os.path.basename(path) == filename:
-                    fail_item = {"path": path, "filename": filename, "reason": status if info is None else f"현재: {status}"}
+                    fail_item = {"path": path, "filename": filename,
+                                 "reason": status if info is None else f"현재: {status}"}
+                    if info is not None:
+                        fail_item["existing_info"] = info
                     break
         if fail_item is None:
             input_path = os.path.join(self.input_dir.get(), filename)
             if os.path.isfile(input_path):
                 fail_item = {"path": input_path, "filename": filename, "reason": status}
+                # 트리에서 기존 파싱값 가져오기
+                vals = self.tree.item(selected[0])["values"]
+                date_str = str(vals[1])
+                name_str = str(vals[2])
+                visit_str = str(vals[3])
+                if date_str != "-" and name_str != "-":
+                    fail_item["existing_display"] = {"date": date_str, "name": name_str, "visit": visit_str}
         if fail_item is None:
             messagebox.showinfo("알림", f"'{filename}' 파일을 찾을 수 없습니다.")
             return
 
-        dialog = ReviewDialog(self.root, [fail_item])
+        # 연속 촬영 그룹 찾기 (항상 입력 폴더 기준으로 스캔)
+        group_paths = []
+        all_paths = self._scan_images(self.input_dir.get())
+        target = fail_item["path"]
+        # target이 all_paths에 없으면 파일명으로 매칭
+        if target not in all_paths:
+            target_fn = os.path.basename(target)
+            for p in all_paths:
+                if os.path.basename(p) == target_fn:
+                    target = p
+                    break
+            else:
+                all_paths.append(target)
+        for group in group_consecutive_photos(all_paths):
+            if target in group:
+                group_paths = group
+                break
+
+        # 그룹 멤버의 파싱 결과 조회 (cached_results → 트리 테이블 폴백)
+        group_cache = {}
+        cache_by_name = {}
+        if self.cached_results:
+            cache_by_name = {os.path.basename(p): info for p, info in self.cached_results.items()}
+        # 트리 테이블에서도 파싱 결과 수집
+        tree_by_name = {}
+        for tree_item in self.tree.get_children():
+            vals = self.tree.item(tree_item)["values"]
+            fn = str(vals[0])
+            status = str(vals[4])
+            if any(kw in status for kw in ("실패", "미분류", "오류", "텍스트 미발견")):
+                tree_by_name[fn] = {"display": status, "failed": True}
+            else:
+                tree_by_name[fn] = {"date": str(vals[1]), "name": str(vals[2]), "visit": str(vals[3])}
+        for gp in group_paths:
+            fn = os.path.basename(gp)
+            # cached_results에서 먼저 찾기 (None이 아닌 경우만)
+            cached = self.cached_results.get(gp)
+            if cached is None and fn in cache_by_name:
+                cached = cache_by_name[fn]
+            if cached is not None:
+                group_cache[gp] = cached
+            elif fn in tree_by_name:
+                # 트리에서 요약 정보 제공 (성공/실패 모두)
+                group_cache[gp] = tree_by_name[fn]
+            else:
+                group_cache[gp] = None
+
+        dialog = ReviewDialog(self.root, [fail_item], group_paths=group_paths, group_cache=group_cache)
         self.root.wait_window(dialog.dialog)
 
         for path, info in dialog.get_results().items():
             if info is not None:
                 self.cached_results[path] = info
                 self.cached_fail_items = [item for item in self.cached_fail_items if item["path"] != path]
+                # 트리에서 해당 행 업데이트
+                fn = os.path.basename(path)
                 visit_str = info.visit_raw or f"{info.visit_number}회"
-                self.tree.item(selected[0], values=(
-                    filename, f"{info.year}.{info.month:02d}.{info.day:02d}",
-                    info.patient_name, visit_str, _make_status(info)))
+                for tree_item in self.tree.get_children():
+                    if str(self.tree.item(tree_item)["values"][0]) == fn:
+                        self.tree.item(tree_item, values=(
+                            fn, f"{info.year}.{info.month:02d}.{info.day:02d}",
+                            info.patient_name, visit_str, _make_status(info)))
+                        break
 
         self.btn_review.config(state="normal" if self.cached_fail_items else "disabled")
 
@@ -756,6 +1186,16 @@ class OrganizerApp:
             self.btn_pause.config(text="재개")
             self.btn_run.config(state="normal")
             self._update_status_direct("일시정지됨 - '재개' 또는 '분류 실행'")
+
+    def _stop_processing(self):
+        if not self.is_running:
+            return
+        self._abort_processing = True
+        self._run_after_abort = False
+        if self.is_paused:
+            self.is_paused = False
+            self.pause_event.set()
+        self._update_status_direct("분류 정지 중...")
 
     def _open_learned(self):
         LearnedCorrectionsDialog(self.root)
@@ -792,10 +1232,12 @@ class OrganizerApp:
         self.btn_run.config(state=state)
         if enabled:
             self.btn_pause.config(state="disabled", text="일시정지")
+            self.btn_stop.config(state="disabled")
             self.is_paused = False
             self.pause_event.set()
         else:
             self.btn_pause.config(state="normal")
+            self.btn_stop.config(state="normal")
         self.btn_review.config(state="normal" if enabled and self.cached_fail_items else "disabled")
 
     def _scan_images(self, input_dir):

@@ -20,6 +20,7 @@ class PhotoInfo:
     source_path: str     # 원본 파일 경로
     visit_raw: str = ""  # "3회" 또는 "fu10" 등 원본 표기
     corrected: bool = False  # 보정 적용 여부
+    visit_review: bool = False  # 회차 검토 필요 여부
 
 
 # === 정규식 패턴 ===
@@ -38,6 +39,8 @@ FILENAME_TS_PATTERN = re.compile(r'(\d{8})_(\d{6})')
 VISIT_MIN, VISIT_MAX = 1, 10
 # 파일명-OCR 날짜 허용 오차 (일)
 DATE_TOLERANCE_DAYS = 5
+# 연속 촬영 그룹 간격 (초)
+_default_max_gap = 60
 
 
 # === 학습 데이터 관리 ===
@@ -137,11 +140,13 @@ def _date_distance(date1, date2):
         return 9999
 
 
-def group_consecutive_photos(image_paths, max_gap_seconds=300):
+def group_consecutive_photos(image_paths, max_gap_seconds=None):
     """
-    연속 촬영된 사진을 그룹으로 묶습니다 (기본 5분 이내).
+    연속 촬영된 사진을 그룹으로 묶습니다 (기본 1분 이내).
     Returns: list of list (각 그룹의 파일 경로 리스트)
     """
+    if max_gap_seconds is None:
+        max_gap_seconds = _default_max_gap
     if not image_paths:
         return []
 
@@ -167,9 +172,11 @@ def group_consecutive_photos(image_paths, max_gap_seconds=300):
 
 # === 날짜 보정 ===
 
-def _fix_ocr_7_to_1(date_str, filename_date=None):
+def _fix_ocr_7_to_1(date_str, filename_date=None, bidirectional=False):
     """
-    OCR 1→7 오인식 보정. 7→1 방향으로만 보정합니다.
+    OCR 1↔7 오인식 보정.
+    - bidirectional=False: 7→1 방향만 (유효한 날짜의 미세 보정)
+    - bidirectional=True: 양방향 7→1, 1→7 (무효한 날짜의 복구)
     - 학습된 보정 우선 적용
     - 후보가 복수면 파일명 날짜에 가장 가까운 후보 선택 (±5일 이내)
     - 확신 없으면 None 반환 (실패 처리)
@@ -178,22 +185,32 @@ def _fix_ocr_7_to_1(date_str, filename_date=None):
     if learned:
         return learned
 
-    positions = [i for i, c in enumerate(date_str) if c == '7']
-    if not positions:
+    # 치환 위치 수집
+    swap_positions = [(i, '1') for i, c in enumerate(date_str) if c == '7']
+    if bidirectional:
+        swap_positions += [(i, '7') for i, c in enumerate(date_str) if c == '1']
+    if not swap_positions:
         return None
 
-    # 7→1 치환 조합으로 유효한 날짜 후보 수집
-    candidates = []
-    for count in range(1, len(positions) + 1):
-        for combo in combinations(positions, count):
+    # 모든 치환 조합으로 유효한 날짜 후보 수집
+    candidates = set()
+    for count in range(1, min(len(swap_positions), 4) + 1):  # 최대 4자리까지
+        for combo in combinations(swap_positions, count):
+            # 같은 위치에 대한 중복 치환 방지
+            positions_in_combo = [p[0] for p in combo]
+            if len(positions_in_combo) != len(set(positions_in_combo)):
+                continue
             chars = list(date_str)
-            for pos in combo:
-                chars[pos] = '1'
+            for pos, replacement in combo:
+                chars[pos] = replacement
             candidate = ''.join(chars)
+            if candidate == date_str:
+                continue
             mm, dd = int(candidate[2:4]), int(candidate[4:6])
             if 1 <= mm <= 12 and 1 <= dd <= 31:
-                candidates.append(candidate)
+                candidates.add(candidate)
 
+    candidates = list(candidates)
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -233,7 +250,7 @@ def parse_date(text, source_path=None):
     filename_date = _extract_date_from_filename(source_path)
 
     if mm < 1 or mm > 12 or dd < 1 or dd > 31:
-        fixed = _fix_ocr_7_to_1(date_str, filename_date)
+        fixed = _fix_ocr_7_to_1(date_str, filename_date, bidirectional=True)
         if fixed:
             date_str = fixed
             yy, mm, dd = int(date_str[0:2]), int(date_str[2:4]), int(date_str[4:6])
@@ -255,14 +272,13 @@ def parse_date(text, source_path=None):
 
 
 def _apply_learned_to_match(name, visit_num):
-    """학습된 이름/회차 보정을 적용합니다."""
+    """학습된 이름 보정을 적용하고, 회차는 검토 플래그만 반환합니다."""
     learned_name = _get_learned("name_corrections", name)
     if learned_name:
         name = learned_name
     learned_visit = _get_learned("visit_corrections", str(visit_num))
-    if learned_visit:
-        visit_num = int(learned_visit)
-    return name, visit_num
+    visit_review = learned_visit is not None
+    return name, visit_num, visit_review
 
 
 def parse_name_visit(text):
@@ -273,24 +289,24 @@ def parse_name_visit(text):
     # 이름 + 숫자 + 회
     match = NAME_VISIT_PATTERN.search(text)
     if match:
-        name, visit_num = _apply_learned_to_match(match.group(1), int(match.group(2)))
+        name, visit_num, visit_review = _apply_learned_to_match(match.group(1), int(match.group(2)))
         if VISIT_MIN <= visit_num <= VISIT_MAX:
-            return (name, visit_num, f"{visit_num}회")
+            return (name, visit_num, f"{visit_num}회", visit_review)
         return None
 
     # "회" 오인식 대응
     match = NAME_VISIT_PATTERN_ALT.search(text)
     if match:
-        name, visit_num = _apply_learned_to_match(match.group(1), int(match.group(2)))
+        name, visit_num, visit_review = _apply_learned_to_match(match.group(1), int(match.group(2)))
         if VISIT_MIN <= visit_num <= VISIT_MAX:
-            return (name, visit_num, f"{visit_num}회")
+            return (name, visit_num, f"{visit_num}회", visit_review)
         return None
 
     # fu(follow-up) 패턴 (범위 제한 없음)
     match = NAME_FU_PATTERN.search(text)
     if match:
-        name, visit_num = _apply_learned_to_match(match.group(1), int(match.group(2)))
-        return (name, visit_num, f"fu{visit_num}")
+        name, visit_num, visit_review = _apply_learned_to_match(match.group(1), int(match.group(2)))
+        return (name, visit_num, f"fu{visit_num}", visit_review)
 
     return None
 
@@ -316,11 +332,12 @@ def parse_photo(lines, confidence, source_path):
         return None
 
     date_raw, year, month, day, corrected = date_result
-    patient_name, visit_number, visit_raw = name_result
+    patient_name, visit_number, visit_raw, visit_review = name_result
 
     return PhotoInfo(
         date_raw=date_raw, year=year, month=month, day=day,
         patient_name=patient_name, visit_number=visit_number,
         confidence=confidence, source_path=source_path,
         visit_raw=visit_raw, corrected=corrected,
+        visit_review=visit_review,
     )
