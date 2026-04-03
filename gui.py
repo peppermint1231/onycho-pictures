@@ -79,13 +79,16 @@ def _make_dark_button(parent, text, command, **kwargs):
 # ============================================================
 
 class ReviewDialog:
-    def __init__(self, parent, fail_items, group_paths=None, group_cache=None):
+    def __init__(self, parent, fail_items, group_paths=None, group_cache=None,
+                 all_images=None, cached_results=None):
         self.parent = parent
         self.fail_items = fail_items
         self.results = {}
         self.current_index = 0
         self.group_paths = group_paths or []
         self.group_cache = group_cache or {}
+        self.all_images = all_images or []
+        self.ext_cached_results = cached_results or {}
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("수동 분류 - 실패 사진 리뷰")
@@ -259,6 +262,48 @@ class ReviewDialog:
         else:
             self.group_detail_outer.pack_forget()
 
+    def _update_group_for_current(self, path):
+        """현재 항목에 맞게 그룹 정보를 동적으로 갱신"""
+        # 그룹 찾기
+        target = path
+        target_fn = os.path.basename(target)
+        all_paths = self.all_images
+        if target not in all_paths:
+            for p in all_paths:
+                if os.path.basename(p) == target_fn:
+                    target = p
+                    break
+        self.group_paths = []
+        for group in group_consecutive_photos(all_paths):
+            if target in group:
+                self.group_paths = group
+                break
+
+        # 그룹 캐시 구성
+        cache_by_name = {os.path.basename(p): info for p, info in self.ext_cached_results.items()} if self.ext_cached_results else {}
+        self.group_cache = {}
+        for gp in self.group_paths:
+            fn = os.path.basename(gp)
+            cached = self.ext_cached_results.get(gp)
+            if cached is None and fn in cache_by_name:
+                cached = cache_by_name[fn]
+            self.group_cache[gp] = cached
+
+        # UI 갱신: 기존 그룹 상세 제거 후 재구성
+        self.apply_group_var.set(False)
+        self.group_detail_outer.pack_forget()
+        for w in self.group_detail_frame.winfo_children():
+            w.destroy()
+
+        if len(self.group_paths) > 1:
+            self.group_check.config(text=f"그룹 일괄 적용 ({len(self.group_paths)}장)")
+            self.group_check.pack(anchor=tk.W, pady=(8, 0))
+            self._build_group_detail()
+            self.group_detail_canvas.config(
+                height=min(200, max(80, len(self.group_paths) * 20)))
+        else:
+            self.group_check.pack_forget()
+
     def _get_cropped_image(self, image_path):
         img = Image.open(image_path)
         w, h = img.size
@@ -333,6 +378,10 @@ class ReviewDialog:
 
         self.date_entry.focus_set()
         self.btn_prev.config(state="normal" if self.current_index > 0 else "disabled")
+
+        # 여러 항목 리뷰 모드: 항목마다 그룹 동적 계산
+        if self.all_images:
+            self._update_group_for_current(path)
 
     def _get_ocr_text(self):
         reason = self.fail_items[self.current_index]["reason"]
@@ -1238,7 +1287,7 @@ class OrganizerApp:
         else:
             self.btn_pause.config(state="normal")
             self.btn_stop.config(state="normal")
-        self.btn_review.config(state="normal" if enabled and self.cached_fail_items else "disabled")
+        self.btn_review.config(state="normal" if self.cached_fail_items else "disabled")
 
     def _scan_images(self, input_dir):
         if not os.path.exists(input_dir):
@@ -1252,7 +1301,9 @@ class OrganizerApp:
         if not self.cached_fail_items:
             messagebox.showinfo("알림", "리뷰할 실패 사진이 없습니다.")
             return
-        dialog = ReviewDialog(self.root, self.cached_fail_items)
+        all_images = self._scan_images(self.input_dir.get())
+        dialog = ReviewDialog(self.root, self.cached_fail_items,
+                              all_images=all_images, cached_results=self.cached_results)
         self.root.wait_window(dialog.dialog)
 
         reviewed = 0
