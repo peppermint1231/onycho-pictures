@@ -461,6 +461,7 @@ class ReviewDialog:
 
         # 그룹 일괄 적용
         if self.apply_group_var.get() and len(self.group_paths) > 1:
+            applied_paths = set()
             for gp in self.group_paths:
                 if gp != path:
                     self.results[gp] = PhotoInfo(
@@ -468,6 +469,17 @@ class ReviewDialog:
                         patient_name=name, visit_number=visit_number,
                         confidence=1.0, source_path=gp, visit_raw=visit_raw,
                     )
+                    applied_paths.add(gp)
+            # 그룹 일괄 적용된 항목을 fail_items에서 제거
+            if applied_paths:
+                removed = 0
+                new_fail_items = []
+                for idx, item in enumerate(self.fail_items):
+                    if item["path"] in applied_paths and idx > self.current_index:
+                        removed += 1
+                    else:
+                        new_fail_items.append(item)
+                self.fail_items = new_fail_items
 
         # 학습 저장
         save_learned(self._get_ocr_text(), info)
@@ -1372,8 +1384,24 @@ class OrganizerApp:
             messagebox.showinfo("알림", "리뷰할 실패 사진이 없습니다.")
             return
         all_images = self._scan_images(self.input_dir.get())
+        # 트리 테이블의 파싱 결과를 cached_results에 보충 (미리보기 진행 중 대응)
+        review_cache = dict(self.cached_results)
+        tree_names = {}
+        for tree_item in self.tree.get_children():
+            vals = self.tree.item(tree_item)["values"]
+            fn = str(vals[0])
+            status = str(vals[4])
+            if any(kw in status for kw in ("실패", "미분류", "오류", "텍스트 미발견")):
+                tree_names[fn] = None
+            else:
+                tree_names[fn] = {"date": str(vals[1]), "name": str(vals[2]),
+                                  "visit": str(vals[3]), "display": status}
+        for img_path in all_images:
+            fn = os.path.basename(img_path)
+            if img_path not in review_cache and fn in tree_names:
+                review_cache[img_path] = tree_names[fn]
         dialog = ReviewDialog(self.root, self.cached_fail_items,
-                              all_images=all_images, cached_results=self.cached_results)
+                              all_images=all_images, cached_results=review_cache)
         self.root.wait_window(dialog.dialog)
 
         reviewed = 0
