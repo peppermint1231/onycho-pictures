@@ -2,6 +2,7 @@
 import os
 import re
 import shutil
+from send2trash import send2trash
 import time
 import threading
 import tkinter as tk
@@ -199,6 +200,8 @@ class ReviewDialog:
                            ("건너뛰기", self._skip),
                            ("모두 건너뛰기", self._skip_all)]:
             _make_dark_button(btn_frame, text, cmd).pack(fill=tk.X, pady=2)
+        _make_dark_button(btn_frame, "파일 삭제", self._delete_current_file,
+                          bg=COLORS["error"], fg="white").pack(fill=tk.X, pady=(8, 2))
 
         # 네비게이션
         nav = tk.Frame(main, bg=COLORS["bg"])
@@ -496,6 +499,33 @@ class ReviewDialog:
         for item in self.fail_items:
             self.results.setdefault(item["path"], None)
         self.dialog.destroy()
+
+    def _delete_current_file(self):
+        if self.current_index >= len(self.fail_items):
+            return
+        item = self.fail_items[self.current_index]
+        path = item["path"]
+        filename = item["filename"]
+        if not os.path.isfile(path):
+            messagebox.showwarning("알림", f"파일을 찾을 수 없습니다:\n{filename}", parent=self.dialog)
+            return
+        if not messagebox.askyesno("파일 삭제",
+                f"'{filename}' 파일을 휴지통으로 보내시겠습니까?", parent=self.dialog):
+            return
+        try:
+            send2trash(path)
+        except Exception as e:
+            messagebox.showerror("오류", f"삭제 실패: {e}", parent=self.dialog)
+            return
+        self.results[path] = "deleted"
+        self.fail_items.pop(self.current_index)
+        if self.current_index >= len(self.fail_items):
+            self.current_index = max(0, len(self.fail_items) - 1)
+        if not self.fail_items:
+            messagebox.showinfo("알림", "리뷰할 사진이 없습니다.", parent=self.dialog)
+            self.dialog.destroy()
+            return
+        self._show_current()
 
     def get_results(self):
         return self.results
@@ -812,6 +842,7 @@ class OrganizerApp:
         # 미리보기 캐시
         self.cached_results = {}
         self.cached_fail_items = []
+        self.deleted_paths = set()
         self.cache_valid = False
 
         self._setup_style()
@@ -1032,6 +1063,7 @@ class OrganizerApp:
                                     font=("Segoe UI", 9), bd=1, relief="solid")
         self.context_menu.add_command(label="사진 파일 열기", command=self._open_selected_photo)
         self.context_menu.add_command(label="개별 리뷰하기", command=self._review_selected)
+        self.context_menu.add_command(label="파일 삭제", command=self._delete_selected_file)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="입력 폴더 열기", command=lambda: _open_folder(self.input_dir.get()))
         self.context_menu.add_command(label="출력 폴더 열기", command=lambda: _open_folder(self.output_dir.get()))
@@ -1123,6 +1155,36 @@ class OrganizerApp:
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(rows))
 
+    def _delete_selected_file(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        filename = str(self.tree.item(selected[0])["values"][0])
+        # 파일 경로 찾기
+        file_path = None
+        for path in self.cached_results:
+            if os.path.basename(path) == filename:
+                file_path = path
+                break
+        if file_path is None:
+            file_path = os.path.join(self.input_dir.get(), filename)
+        if not os.path.isfile(file_path):
+            messagebox.showwarning("알림", f"파일을 찾을 수 없습니다:\n{filename}")
+            return
+        if not messagebox.askyesno("파일 삭제", f"'{filename}' 파일을 휴지통으로 보내시겠습니까?"):
+            return
+        try:
+            send2trash(file_path)
+        except Exception as e:
+            messagebox.showerror("오류", f"삭제 실패: {e}")
+            return
+        # 캐시에서 제거
+        self.deleted_paths.add(file_path)
+        self.cached_results.pop(file_path, None)
+        self.cached_fail_items = [item for item in self.cached_fail_items if item["path"] != file_path]
+        self.tree.delete(selected[0])
+        self.btn_review.config(state="normal" if self.cached_fail_items else "disabled")
+
     def _review_selected(self):
         selected = self.tree.selection()
         if not selected:
@@ -1206,10 +1268,18 @@ class OrganizerApp:
         self.root.wait_window(dialog.dialog)
 
         for path, info in dialog.get_results().items():
-            if info is not None:
+            if info == "deleted":
+                self.deleted_paths.add(path)
+                self.cached_results.pop(path, None)
+                self.cached_fail_items = [item for item in self.cached_fail_items if item["path"] != path]
+                fn = os.path.basename(path)
+                for tree_item in self.tree.get_children():
+                    if str(self.tree.item(tree_item)["values"][0]) == fn:
+                        self.tree.delete(tree_item)
+                        break
+            elif info is not None:
                 self.cached_results[path] = info
                 self.cached_fail_items = [item for item in self.cached_fail_items if item["path"] != path]
-                # 트리에서 해당 행 업데이트
                 fn = os.path.basename(path)
                 visit_str = info.visit_raw or f"{info.visit_number}회"
                 for tree_item in self.tree.get_children():
@@ -1307,15 +1377,44 @@ class OrganizerApp:
         self.root.wait_window(dialog.dialog)
 
         reviewed = 0
+        deleted = 0
         for path, info in dialog.get_results().items():
-            if info is not None:
+            if info == "deleted":
+                self.deleted_paths.add(path)
+                self.cached_results.pop(path, None)
+                deleted += 1
+            elif info is not None:
                 self.cached_results[path] = info
                 reviewed += 1
         self.cached_fail_items = [item for item in self.cached_fail_items
                                    if dialog.get_results().get(item["path"]) is None]
-        self._refresh_table()
+        if not self.is_running:
+            self._refresh_table()
+        else:
+            # 진행 중에는 개별 행만 업데이트
+            for path, info in dialog.get_results().items():
+                if info == "deleted":
+                    fn = os.path.basename(path)
+                    for tree_item in self.tree.get_children():
+                        if str(self.tree.item(tree_item)["values"][0]) == fn:
+                            self.tree.delete(tree_item)
+                            break
+                elif info is not None:
+                    fn = os.path.basename(path)
+                    visit_str = info.visit_raw or f"{info.visit_number}회"
+                    for tree_item in self.tree.get_children():
+                        if str(self.tree.item(tree_item)["values"][0]) == fn:
+                            self.tree.item(tree_item, values=(
+                                fn, f"{info.year}.{info.month:02d}.{info.day:02d}",
+                                info.patient_name, visit_str, _make_status(info)))
+                            break
+        msg_parts = []
         if reviewed > 0:
-            self._update_status_direct(f"리뷰 완료! {reviewed}장 수기 입력됨  |  '분류 실행' 버튼을 누르면 모두 분류합니다.")
+            msg_parts.append(f"{reviewed}장 수기 입력됨")
+        if deleted > 0:
+            msg_parts.append(f"{deleted}장 삭제됨")
+        if msg_parts and not self.is_running:
+            self._update_status_direct(f"리뷰 완료! {', '.join(msg_parts)}  |  '분류 실행' 버튼을 누르면 모두 분류합니다.")
         self.btn_review.config(state="normal" if self.cached_fail_items else "disabled")
 
     def _refresh_table(self):
@@ -1338,6 +1437,7 @@ class OrganizerApp:
     def _run_preview(self):
         self.cache_valid = False
         self.cached_fail_items = []
+        self.deleted_paths = set()
         self._start_processing(dry_run=True)
 
     def _run_organize(self):
@@ -1438,6 +1538,15 @@ class OrganizerApp:
         new_fail_items = []
         start_time = time.time()
 
+        def _add_fail_item(item):
+            if item["path"] in self.deleted_paths:
+                return
+            new_fail_items.append(item)
+            if dry_run:
+                self.cached_fail_items = [i for i in new_fail_items if i["path"] not in self.deleted_paths]
+                if self.cached_fail_items:
+                    self.root.after(0, lambda: self.btn_review.config(state="normal"))
+
         for i, image_path in enumerate(images):
             self.pause_event.wait()
             if self._abort_processing:
@@ -1458,7 +1567,7 @@ class OrganizerApp:
                 if not dry_run:
                     move_to_review(image_path, reason=f"OCR 오류: {e}", review_dir=review_dir)
                 new_cache[image_path] = None
-                new_fail_items.append({"path": image_path, "filename": filename, "reason": f"OCR 오류: {e}"})
+                _add_fail_item({"path": image_path, "filename": filename, "reason": f"OCR 오류: {e}"})
                 fail += 1
                 self._update_progress(i + 1)
                 continue
@@ -1468,7 +1577,7 @@ class OrganizerApp:
                 if not dry_run:
                     move_to_review(image_path, reason="텍스트 미발견", review_dir=review_dir)
                 new_cache[image_path] = None
-                new_fail_items.append({"path": image_path, "filename": filename, "reason": "텍스트 미발견"})
+                _add_fail_item({"path": image_path, "filename": filename, "reason": "텍스트 미발견"})
                 fail += 1
                 self._update_progress(i + 1)
                 continue
@@ -1480,7 +1589,7 @@ class OrganizerApp:
                 if not dry_run:
                     move_to_review(image_path, reason=f"파싱 실패 - OCR: {ocr_text}", review_dir=review_dir)
                 new_cache[image_path] = None
-                new_fail_items.append({"path": image_path, "filename": filename, "reason": f"파싱 실패: {ocr_text}"})
+                _add_fail_item({"path": image_path, "filename": filename, "reason": f"파싱 실패: {ocr_text}"})
                 fail += 1
                 self._update_progress(i + 1)
                 continue
@@ -1491,6 +1600,10 @@ class OrganizerApp:
             if dry_run:
                 self._add_row(filename, date_str, info.patient_name, vs, _make_status(info))
                 new_cache[image_path] = info
+                if info.visit_review:
+                    _add_fail_item({"path": image_path, "filename": filename,
+                                    "reason": f"회차검토: {date_str} {info.patient_name} {vs}",
+                                    "existing_info": info})
             else:
                 action = "복사" if copy else "이동"
                 try:
@@ -1531,6 +1644,17 @@ class OrganizerApp:
             new_fail_items = [item for item in new_fail_items if new_cache.get(item["path"]) is None]
 
         if dry_run:
+            # 삭제된 파일 제거
+            for dp in self.deleted_paths:
+                new_cache.pop(dp, None)
+            new_fail_items = [item for item in new_fail_items if item["path"] not in self.deleted_paths]
+            # 미리보기 중 리뷰에서 수정된 결과를 병합
+            for path, info in self.cached_results.items():
+                if info is not None and new_cache.get(path) is None and path not in self.deleted_paths:
+                    new_cache[path] = info
+                    new_fail_items = [item for item in new_fail_items if item["path"] != path]
+                    success += 1
+                    fail -= 1
             self.cached_results = new_cache
             self.cached_fail_items = new_fail_items
             self.cache_valid = True
