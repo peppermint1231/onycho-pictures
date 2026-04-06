@@ -15,8 +15,14 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 # Windows cp949 인코딩 오류 방지 - stdout/stderr를 UTF-8로 교체
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    if sys.stdout is not None and hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    elif sys.stdout is None:
+        sys.stdout = io.StringIO()
+    if sys.stderr is not None and hasattr(sys.stderr, 'buffer'):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    elif sys.stderr is None:
+        sys.stderr = io.StringIO()
     os.environ["PYTHONIOENCODING"] = "utf-8"
 
 _reader = None
