@@ -192,6 +192,7 @@ class ReviewDialog:
                 text=f"그룹 일괄 적용 ({len(self.group_paths)}장)")
             self.group_check.pack(anchor=tk.W, pady=(8, 0))
             self._build_group_detail()
+            self.group_detail_outer.pack(fill=tk.X, pady=(4, 0))
 
         # 액션 버튼
         btn_frame = tk.Frame(input_frame, bg=COLORS["surface"])
@@ -293,7 +294,7 @@ class ReviewDialog:
             self.group_cache[gp] = cached
 
         # UI 갱신: 기존 그룹 상세 제거 후 재구성
-        self.apply_group_var.set(False)
+        was_checked = self.apply_group_var.get()
         self.group_detail_outer.pack_forget()
         for w in self.group_detail_frame.winfo_children():
             w.destroy()
@@ -304,6 +305,9 @@ class ReviewDialog:
             self._build_group_detail()
             self.group_detail_canvas.config(
                 height=min(200, max(80, len(self.group_paths) * 20)))
+            self.group_detail_outer.pack(fill=tk.X, pady=(4, 0))
+            if not was_checked:
+                self.apply_group_var.set(False)
         else:
             self.group_check.pack_forget()
 
@@ -1392,7 +1396,7 @@ class OrganizerApp:
             fn = str(vals[0])
             status = str(vals[4])
             if any(kw in status for kw in ("실패", "미분류", "오류", "텍스트 미발견")):
-                tree_names[fn] = None
+                tree_names[fn] = {"display": status, "failed": True}
             else:
                 tree_names[fn] = {"date": str(vals[1]), "name": str(vals[2]),
                                   "visit": str(vals[3]), "display": status}
